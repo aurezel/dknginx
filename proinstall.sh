@@ -169,11 +169,14 @@ docker compose up -d
 echo "Docker 启动完成"
 
 ###################################################
-# 7️⃣ 宝塔 Nginx 自动反代（存在则跳过）
+# 7️⃣ 宝塔 Nginx 自动反代（检查内容，而不是检查文件）
 ###################################################
 
-if [ ! -f "$NGINX_CONF" ]; then
-    echo "写入 Nginx 反代配置..."
+# 检查是否已经存在反向代理配置
+if grep -q "proxy_pass http://127.0.0.1:9001" "$NGINX_CONF" 2>/dev/null; then
+    echo "Nginx 已存在反向代理配置 → 跳过"
+else
+    echo "未检测到反向代理配置 → 写入新 Nginx 配置..."
 
 cat > $NGINX_CONF <<EOF
 server
@@ -201,9 +204,8 @@ server
 }
 EOF
 
+    echo "重载 Nginx..."
     /www/server/nginx/sbin/nginx -s reload
-else
-    echo "Nginx 配置已存在 → 跳过"
 fi
 
 echo "=============================================="
