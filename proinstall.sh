@@ -1,12 +1,12 @@
 #!/bin/bash
 
 ###################################################
-# 安全模式一键部署脚本（可重复执行不会破坏数据）
-# - 自动 clone 或 pull（不会清空目录）
-# - 使用 www 用户
-# - Docker + PHP7.4 + Apache
+# ProInstall.sh（安全模式 + checkout 子目录版）
+# - Git clone/pull → /www/wwwroot/<domain>/checkout
+# - Docker PHP7.4 + Apache（www 用户）
 # - 自动修复 Apache 日志权限
-# - 宝塔 Nginx 自动反代（若存在则不覆盖）
+# - 自动生成 docker-compose + vhost.conf
+# - 宝塔 Nginx 自动反代
 ###################################################
 
 if [ $# -lt 1 ]; then
@@ -17,41 +17,41 @@ fi
 SUB_DOMAIN=$1
 MAIN_DOMAIN=$(echo $SUB_DOMAIN | sed 's/^[^.]*\.//')
 
-PROJECT_DIR="/opt/docker/$SUB_DOMAIN"
-WWW_DIR="/www/wwwroot/$SUB_DOMAIN"
-LOG_DIR="/var/log/$SUB_DOMAIN"
+WWW_DIR="/www/wwwroot/$SUB_DOMAIN"              # 网站根目录（不清空）
+PROJECT_CODE_DIR="$WWW_DIR/checkout"            # Git clone 在 checkout 子目录
+PROJECT_DIR="/opt/docker/$SUB_DOMAIN"           # Docker 构建路径
+LOG_DIR="/var/log/$SUB_DOMAIN"                  # Apache 日志目录
 NGINX_CONF="/www/server/panel/vhost/nginx/${SUB_DOMAIN}.conf"
 
 GIT_REPO="ssh://git@38.58.183.76:57577/home/git/local/stripifyv11.git"
 
 echo "=============================================="
 echo " 部署域名：$SUB_DOMAIN"
-echo " Docker：  $PROJECT_DIR"
 echo " 网站目录：$WWW_DIR"
+echo " Git代码： $PROJECT_CODE_DIR"
+echo " Docker：  $PROJECT_DIR"
 echo " 日志目录：$LOG_DIR"
-echo " Git仓库： $GIT_REPO"
 echo "=============================================="
 
 mkdir -p $PROJECT_DIR
+mkdir -p $PROJECT_CODE_DIR
 mkdir -p $LOG_DIR
 
 ###################################################
-# 1️⃣ 目录权限处理
+# 1️⃣ 修复权限（不清空网站根目录）
 ###################################################
 chattr -R -i $WWW_DIR 2>/dev/null
-mkdir -p $WWW_DIR
 
-echo "修复权限..."
 chown -R www:www $WWW_DIR
 chown -R www:www $LOG_DIR
 
 ###################################################
-# 2️⃣ Git（安全模式 clone/pull）
+# 2️⃣ Git（clone 或 pull，仅在 checkout 目录）
 ###################################################
-echo "=== Git 部署 ==="
+echo "=== Git 部署（checkout 子目录）==="
 
-if [ ! -d "$WWW_DIR/.git" ]; then
-    echo "目录不存在 Git 仓库 → 执行 clone"
+if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
+    echo "checkout 目录无 Git 仓库 → clone"
 
     read -sp "请输入 Git 仓库密码: " GIT_PASS
     echo
@@ -61,15 +61,22 @@ if [ ! -d "$WWW_DIR/.git" ]; then
         apt-get install -y sshpass
     fi
 
-    sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$WWW_DIR"
+    # 清空 checkout 子目录（不影响网站目录）
+    if [ "$(ls -A $PROJECT_CODE_DIR)" ]; then
+        rm -rf ${PROJECT_CODE_DIR:?}/*
+    fi
+
+    sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$PROJECT_CODE_DIR"
+
     if [ $? -ne 0 ]; then
         echo "❌ Git clone 失败"
         exit 1
     fi
 else
-    echo "检测到已有 Git 仓库 → 执行 git pull"
+    echo "checkout 已存在 Git 仓库 → 执行 git pull"
+
     (
-        cd $WWW_DIR
+        cd "$PROJECT_CODE_DIR"
         git reset --hard
         git pull
     )
@@ -77,17 +84,14 @@ fi
 
 echo "✔ Git 同步完成"
 
-###################################################
-# 3️⃣ 权限再次修复
-###################################################
-chown -R www:www $WWW_DIR
-find $WWW_DIR -type d -exec chmod 755 {} \;
-find $WWW_DIR -type f -exec chmod 644 {} \;
+# 修复权限（checkout 目录）
+chown -R www:www $PROJECT_CODE_DIR
+find $PROJECT_CODE_DIR -type d -exec chmod 755 {} \;
+find $PROJECT_CODE_DIR -type f -exec chmod 644 {} \;
 
 ###################################################
-# 4️⃣ 生成 Dockerfile（带日志修复）
+# 3️⃣ Dockerfile（包含 Apache 日志修复）
 ###################################################
-
 cat > $PROJECT_DIR/Dockerfile <<EOF
 FROM php:7.4-apache
 
@@ -101,15 +105,14 @@ RUN a2enmod rewrite
 
 USER root
 
-# 提前创建 Apache 日志（解决权限问题）
+# 提前创建 Apache 日志文件（避免权限问题）
 RUN mkdir -p /var/log/apache2 && \
     touch /var/log/apache2/error.log && \
     touch /var/log/apache2/access.log && \
     chown -R www:www /var/log/apache2
 
-# 修复 web 目录权限
-RUN mkdir -p /var/www/html && \
-    chown -R www:www /var/www
+# 修复 web 根目录
+RUN mkdir -p /var/www/html && chown -R www:www /var/www
 
 USER www
 
@@ -121,7 +124,7 @@ EOF
 echo "Dockerfile 已生成"
 
 ###################################################
-# 5️⃣ vhost.conf
+# 4️⃣ vhost.conf
 ###################################################
 cat > $PROJECT_DIR/vhost.conf <<EOF
 <VirtualHost *:80>
@@ -136,7 +139,7 @@ cat > $PROJECT_DIR/vhost.conf <<EOF
 EOF
 
 ###################################################
-# 6️⃣ docker-compose.yml
+# 5️⃣ docker-compose.yml（挂载整个网站目录）
 ###################################################
 cat > $PROJECT_DIR/docker-compose.yml <<EOF
 version: "3.8"
@@ -162,25 +165,22 @@ networks:
 EOF
 
 ###################################################
-# 7️⃣ 启动/更新 Docker（智能模式）
+# 6️⃣ Docker 构建 + 启动
 ###################################################
 cd $PROJECT_DIR
-
-echo "=== Docker 构建 ==="
 
 docker compose build
 docker compose up -d
 
-echo "Docker 已启动（智能安全模式）"
+echo "Docker 启动完成"
 
 ###################################################
-# 8️⃣ 宝塔 Nginx 反代（已存在不会覆盖）
+# 7️⃣ 宝塔 Nginx 反代配置（存在则跳过）
 ###################################################
-
 if [ ! -f "$NGINX_CONF" ]; then
     echo "写入 Nginx 反代配置..."
 
-    cat > $NGINX_CONF <<EOF
+cat > $NGINX_CONF <<EOF
 server
 {
     listen 80;
@@ -206,13 +206,12 @@ server
 }
 EOF
 
-    echo "重载 nginx..."
     /www/server/nginx/sbin/nginx -s reload
 else
-    echo "检测到 Nginx 配置已存在 → 跳过写入"
+    echo "Nginx 配置已存在 → 跳过写入"
 fi
 
 echo "=============================================="
-echo "🎉 安全模式部署完成（可重复执行，无风险）"
-echo "访问：https://$SUB_DOMAIN"
+echo "🎉 部署完成 | checkout 子目录 + 安全模式"
+echo "访问地址：https://$SUB_DOMAIN"
 echo "=============================================="
