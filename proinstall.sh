@@ -1,12 +1,11 @@
 #!/bin/bash
 
 ###################################################
-# ProInstall.sh（安全模式 + checkout 子目录版）
-# - Git clone/pull → /www/wwwroot/<domain>/checkout
-# - Docker PHP7.4 + Apache（www 用户）
-# - 自动修复 Apache 日志权限
-# - 自动生成 docker-compose + vhost.conf
-# - 宝塔 Nginx 自动反代
+# ProInstall.sh（安全模式 + checkout 子目录 + 无日志挂载）
+# - Git clone/pull → checkout 子目录
+# - Docker PHP7.4 + Apache
+# - 移除 Apache 日志挂载（彻底解决权限问题）
+# - 自动反代到宝塔 Nginx
 ###################################################
 
 if [ $# -lt 1 ]; then
@@ -17,12 +16,12 @@ fi
 SUB_DOMAIN=$1
 MAIN_DOMAIN=$(echo $SUB_DOMAIN | sed 's/^[^.]*\.//')
 
-WWW_DIR="/www/wwwroot/$SUB_DOMAIN"              # 网站根目录（不清空）
-PROJECT_CODE_DIR="$WWW_DIR/checkout"            # Git clone 在 checkout 子目录
-PROJECT_DIR="/opt/docker/$SUB_DOMAIN"           # Docker 构建路径
-LOG_DIR="/var/log/$SUB_DOMAIN"                  # Apache 日志目录
+WWW_DIR="/www/wwwroot/$SUB_DOMAIN"                # 网站根目录
+PROJECT_CODE_DIR="$WWW_DIR/checkout"              # Git 代码目录
+PROJECT_DIR="/opt/docker/$SUB_DOMAIN"             # Docker 构建目录
 NGINX_CONF="/www/server/panel/vhost/nginx/${SUB_DOMAIN}.conf"
 
+# Git 仓库
 GIT_REPO="ssh://git@38.58.183.76:57577/home/git/local/stripifyv11.git"
 
 echo "=============================================="
@@ -30,28 +29,24 @@ echo " 部署域名：$SUB_DOMAIN"
 echo " 网站目录：$WWW_DIR"
 echo " Git代码： $PROJECT_CODE_DIR"
 echo " Docker：  $PROJECT_DIR"
-echo " 日志目录：$LOG_DIR"
 echo "=============================================="
 
 mkdir -p $PROJECT_DIR
 mkdir -p $PROJECT_CODE_DIR
-mkdir -p $LOG_DIR
 
 ###################################################
 # 1️⃣ 修复权限（不清空网站根目录）
 ###################################################
 chattr -R -i $WWW_DIR 2>/dev/null
-
 chown -R www:www $WWW_DIR
-chown -R www:www $LOG_DIR
 
 ###################################################
-# 2️⃣ Git（clone 或 pull，仅在 checkout 目录）
+# 2️⃣ Git clone/pull（安全模式）
 ###################################################
 echo "=== Git 部署（checkout 子目录）==="
 
 if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
-    echo "checkout 目录无 Git 仓库 → clone"
+    echo "checkout 目录无 Git 仓库 → 执行 clone"
 
     read -sp "请输入 Git 仓库密码: " GIT_PASS
     echo
@@ -61,7 +56,7 @@ if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
         apt-get install -y sshpass
     fi
 
-    # 清空 checkout 子目录（不影响网站目录）
+    # 清空 checkout 子目录（不影响网站根目录其他文件）
     if [ "$(ls -A $PROJECT_CODE_DIR)" ]; then
         rm -rf ${PROJECT_CODE_DIR:?}/*
     fi
@@ -73,8 +68,7 @@ if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
         exit 1
     fi
 else
-    echo "checkout 已存在 Git 仓库 → 执行 git pull"
-
+    echo "checkout 存在 Git 仓库 → 执行 pull"
     (
         cd "$PROJECT_CODE_DIR"
         git reset --hard
@@ -84,13 +78,12 @@ fi
 
 echo "✔ Git 同步完成"
 
-# 修复权限（checkout 目录）
 chown -R www:www $PROJECT_CODE_DIR
 find $PROJECT_CODE_DIR -type d -exec chmod 755 {} \;
 find $PROJECT_CODE_DIR -type f -exec chmod 644 {} \;
 
 ###################################################
-# 3️⃣ Dockerfile（包含 Apache 日志修复）
+# 3️⃣ Dockerfile（无需日志挂载）
 ###################################################
 cat > $PROJECT_DIR/Dockerfile <<EOF
 FROM php:7.4-apache
@@ -105,13 +98,13 @@ RUN a2enmod rewrite
 
 USER root
 
-# 提前创建 Apache 日志文件（避免权限问题）
+# 提前创建 Apache 日志，避免容器内报错
 RUN mkdir -p /var/log/apache2 && \
     touch /var/log/apache2/error.log && \
     touch /var/log/apache2/access.log && \
     chown -R www:www /var/log/apache2
 
-# 修复 web 根目录
+# 修复 Web 根目录权限
 RUN mkdir -p /var/www/html && chown -R www:www /var/www
 
 USER www
@@ -139,7 +132,7 @@ cat > $PROJECT_DIR/vhost.conf <<EOF
 EOF
 
 ###################################################
-# 5️⃣ docker-compose.yml（挂载整个网站目录）
+# 5️⃣ docker-compose.yml（已删除日志挂载！）
 ###################################################
 cat > $PROJECT_DIR/docker-compose.yml <<EOF
 version: "3.8"
@@ -153,7 +146,6 @@ services:
       - "127.0.0.1:9001:80"
     volumes:
       - $WWW_DIR:/var/www/html
-      - $LOG_DIR:/var/log/apache2
     environment:
       - TZ=Asia/Shanghai
     networks:
@@ -163,6 +155,8 @@ networks:
   deploy_net:
     driver: bridge
 EOF
+
+echo "docker-compose.yml 已生成（已删除日志挂载）"
 
 ###################################################
 # 6️⃣ Docker 构建 + 启动
@@ -175,8 +169,9 @@ docker compose up -d
 echo "Docker 启动完成"
 
 ###################################################
-# 7️⃣ 宝塔 Nginx 反代配置（存在则跳过）
+# 7️⃣ 宝塔 Nginx 自动反代（存在则跳过）
 ###################################################
+
 if [ ! -f "$NGINX_CONF" ]; then
     echo "写入 Nginx 反代配置..."
 
@@ -208,10 +203,10 @@ EOF
 
     /www/server/nginx/sbin/nginx -s reload
 else
-    echo "Nginx 配置已存在 → 跳过写入"
+    echo "Nginx 配置已存在 → 跳过"
 fi
 
 echo "=============================================="
-echo "🎉 部署完成 | checkout 子目录 + 安全模式"
-echo "访问地址：https://$SUB_DOMAIN"
+echo "🎉 部署完成（无日志挂载版本，100% 稳定）"
+echo "访问：https://$SUB_DOMAIN"
 echo "=============================================="
