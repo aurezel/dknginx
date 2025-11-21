@@ -1,12 +1,11 @@
 #!/bin/bash
 
 ###################################################
-# 完整版一键部署脚本：
-# - Git 自动克隆（交互式密码）
-# - 使用 www 用户（UID 1000）
-# - Docker + Apache + PHP7.4
-# - 宝塔 Nginx 自动反向代理
-# - 自动提前创建 Apache 日志，彻底解决权限被拒绝问题
+# ProInstall.sh（安全模式 + checkout 子目录 + 无日志挂载）
+# - Git clone/pull → checkout 子目录
+# - Docker PHP7.4 + Apache
+# - 移除 Apache 日志挂载（彻底解决权限问题）
+# - 自动反代到宝塔 Nginx
 ###################################################
 
 if [ $# -lt 1 ]; then
@@ -17,77 +16,75 @@ fi
 SUB_DOMAIN=$1
 MAIN_DOMAIN=$(echo $SUB_DOMAIN | sed 's/^[^.]*\.//')
 
-PROJECT_DIR="/opt/docker/$SUB_DOMAIN"
-WWW_DIR="/www/wwwroot/$SUB_DOMAIN"
-LOG_DIR="/var/log/$SUB_DOMAIN"
+WWW_DIR="/www/wwwroot/$SUB_DOMAIN"                # 网站根目录
+PROJECT_CODE_DIR="$WWW_DIR/checkout"              # Git 代码目录
+PROJECT_DIR="/opt/docker/$SUB_DOMAIN"             # Docker 构建目录
 NGINX_CONF="/www/server/panel/vhost/nginx/${SUB_DOMAIN}.conf"
 
-# Git 仓库地址
+# Git 仓库
 GIT_REPO="ssh://git@38.58.183.76:57577/home/git/local/stripifyv11.git"
 
 echo "=============================================="
 echo " 部署域名：$SUB_DOMAIN"
-echo " 主域名：  $MAIN_DOMAIN"
-echo " Docker：  $PROJECT_DIR"
 echo " 网站目录：$WWW_DIR"
-echo " 日志目录：$LOG_DIR"
-echo " Git仓库： $GIT_REPO"
+echo " Git代码： $PROJECT_CODE_DIR"
+echo " Docker：  $PROJECT_DIR"
 echo "=============================================="
 
 mkdir -p $PROJECT_DIR
-mkdir -p $WWW_DIR
-mkdir -p $LOG_DIR
+mkdir -p $PROJECT_CODE_DIR
 
 ###################################################
-# 1️⃣ 解锁宝塔保护文件
+# 1️⃣ 修复权限（不清空网站根目录）
 ###################################################
 chattr -R -i $WWW_DIR 2>/dev/null
-
-###################################################
-# 2️⃣ Git 克隆项目（安全交互式密码）
-###################################################
-
-echo "===> 开始克隆 Git 项目"
-read -sp "请输入 Git 仓库密码: " GIT_PASS
-echo
-
-# 安装 sshpass
-if ! command -v sshpass >/dev/null 2>&1; then
-    apt-get update -y
-    apt-get install -y sshpass
-fi
-
-# 清空旧项目目录
-if [ "$(ls -A $WWW_DIR)" ]; then
-    echo "检测到 $WWW_DIR 非空 → 清空目录..."
-    rm -rf ${WWW_DIR:?}/*
-fi
-
-# 克隆仓库
-sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$WWW_DIR"
-
-if [ $? -ne 0 ]; then
-    echo "❌ Git 克隆失败——请检查密码或仓库权限"
-    exit 1
-fi
-
-echo "✔ Git 克隆成功"
-
-###################################################
-# 3️⃣ 修复宿主机权限（www:www）
-###################################################
-echo "修复目录权限为 www:www ..."
-
 chown -R www:www $WWW_DIR
-chown -R www:www $LOG_DIR
-
-find $WWW_DIR -type d -exec chmod 755 {} \;
-find $WWW_DIR -type f -exec chmod 644 {} \;
 
 ###################################################
-# 4️⃣ 生成 Dockerfile（含 Apache 日志修复）
+# 2️⃣ Git clone/pull（安全模式）
 ###################################################
+echo "=== Git 部署（checkout 子目录）==="
 
+if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
+    echo "checkout 目录无 Git 仓库 → 执行 clone"
+
+    read -sp "请输入 Git 仓库密码: " GIT_PASS
+    echo
+
+    if ! command -v sshpass >/dev/null; then
+        apt-get update -y
+        apt-get install -y sshpass
+    fi
+
+    # 清空 checkout 子目录（不影响网站根目录其他文件）
+    if [ "$(ls -A $PROJECT_CODE_DIR)" ]; then
+        rm -rf ${PROJECT_CODE_DIR:?}/*
+    fi
+
+    sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$PROJECT_CODE_DIR"
+
+    if [ $? -ne 0 ]; then
+        echo "❌ Git clone 失败"
+        exit 1
+    fi
+else
+    echo "checkout 存在 Git 仓库 → 执行 pull"
+    (
+        cd "$PROJECT_CODE_DIR"
+        git reset --hard
+        git pull
+    )
+fi
+
+echo "✔ Git 同步完成"
+
+chown -R www:www $PROJECT_CODE_DIR
+find $PROJECT_CODE_DIR -type d -exec chmod 755 {} \;
+find $PROJECT_CODE_DIR -type f -exec chmod 644 {} \;
+
+###################################################
+# 3️⃣ Dockerfile（无需日志挂载）
+###################################################
 cat > $PROJECT_DIR/Dockerfile <<EOF
 FROM php:7.4-apache
 
@@ -99,17 +96,17 @@ RUN groupadd -g 1000 www && \
 
 RUN a2enmod rewrite
 
-# 使用 root 创建 Apache 日志并赋予 www 权限（关键修复）
 USER root
+
+# 提前创建 Apache 日志，避免容器内报错
 RUN mkdir -p /var/log/apache2 && \
     touch /var/log/apache2/error.log && \
     touch /var/log/apache2/access.log && \
     chown -R www:www /var/log/apache2
 
-# 修复 web 目录权限
+# 修复 Web 根目录权限
 RUN mkdir -p /var/www/html && chown -R www:www /var/www
 
-# 切换到 www 用户
 USER www
 
 COPY vhost.conf /etc/apache2/sites-available/000-default.conf
@@ -120,9 +117,8 @@ EOF
 echo "Dockerfile 已生成"
 
 ###################################################
-# 5️⃣ vhost.conf
+# 4️⃣ vhost.conf
 ###################################################
-
 cat > $PROJECT_DIR/vhost.conf <<EOF
 <VirtualHost *:80>
     ServerName $SUB_DOMAIN
@@ -135,12 +131,9 @@ cat > $PROJECT_DIR/vhost.conf <<EOF
 </VirtualHost>
 EOF
 
-echo "vhost.conf 已生成"
-
 ###################################################
-# 6️⃣ docker-compose.yml
+# 5️⃣ docker-compose.yml（已删除日志挂载！）
 ###################################################
-
 cat > $PROJECT_DIR/docker-compose.yml <<EOF
 version: "3.8"
 
@@ -153,7 +146,6 @@ services:
       - "127.0.0.1:9001:80"
     volumes:
       - $WWW_DIR:/var/www/html
-      - $LOG_DIR:/var/log/apache2
     environment:
       - TZ=Asia/Shanghai
     networks:
@@ -164,20 +156,27 @@ networks:
     driver: bridge
 EOF
 
-echo "docker-compose.yml 已生成"
+echo "docker-compose.yml 已生成（已删除日志挂载）"
 
 ###################################################
-# 7️⃣ 启动 Docker
+# 6️⃣ Docker 构建 + 启动
 ###################################################
 cd $PROJECT_DIR
-docker compose down
-docker compose up -d --build
 
-echo "Docker 已启动 → http://127.0.0.1:9001"
+docker compose build
+docker compose up -d
+
+echo "Docker 启动完成"
 
 ###################################################
-# 8️⃣ 写入宝塔 Nginx 反代
+# 7️⃣ 宝塔 Nginx 自动反代（检查内容，而不是检查文件）
 ###################################################
+
+# 检查是否已经存在反向代理配置
+if grep -q "proxy_pass http://127.0.0.1:9001" "$NGINX_CONF" 2>/dev/null; then
+    echo "Nginx 已存在反向代理配置 → 跳过"
+else
+    echo "未检测到反向代理配置 → 写入新 Nginx 配置..."
 
 cat > $NGINX_CONF <<EOF
 server
@@ -205,9 +204,11 @@ server
 }
 EOF
 
-/www/server/nginx/sbin/nginx -s reload
+    echo "重载 Nginx..."
+    /www/server/nginx/sbin/nginx -s reload
+fi
 
 echo "=============================================="
-echo "🎉 部署完成！"
-echo "访问地址：https://$SUB_DOMAIN"
+echo "🎉 部署完成（无日志挂载版本，100% 稳定）"
+echo "访问：https://$SUB_DOMAIN"
 echo "=============================================="

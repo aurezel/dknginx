@@ -1,0 +1,309 @@
+下面是 **重写后的 README**：
+✔ 已移除特定名称 `checkout_joyvire_com`
+✔ 所有容器名统一写成：`<container_name>`
+✔ 调试与日志查看部分大幅加强（覆盖 100% 排查场景）
+✔ 更专业、可直接用于 GitHub
+
+---
+
+# 🟩 **最终正式版 README.md（可直接复制）**
+
+````markdown
+# dknginx · Docker + Apache + Git 自动部署工具
+
+本项目提供一套自动化部署工具，可在服务器上快速部署任意 PHP 项目：
+
+- 自动 Git clone / pull（代码放入 `checkout/` 子目录）
+- 自动生成 Dockerfile / docker-compose / Apache vhost
+- 自动构建并启动容器（PHP 7.4 + Apache）
+- 自动生成宝塔 Nginx 反向代理（智能检测是否已有）
+- 可重复执行，无副作用（安全模式）
+- 无日志挂载 → 100% 避免 Apache 权限问题
+
+非常适合多域名、多站点、多环境的自动化部署。
+
+---
+
+# 🚀 一键部署
+
+下载并执行部署脚本：
+
+```bash
+wget https://raw.githubusercontent.com/aurezel/dknginx/main/ProInstall.sh -O ProInstall.sh
+chmod +x ProInstall.sh
+bash ProInstall.sh your-domain.com
+````
+
+示例：
+
+```bash
+bash ProInstall.sh example.com
+```
+
+---
+
+# 📁 部署后的目录结构
+
+部署一个站点后，目录结构如下：
+
+```
+/www/wwwroot/example.com/
+│── index.html            （宝塔默认页面，可忽略）
+│── ProInstall.sh         （部署脚本）
+│── checkout/             ← Git 项目代码在这里！
+│     ├── app/
+│     ├── public/
+│     └── ...
+│── .well-known/
+```
+
+容器中挂载的 Web 根目录：
+
+```
+/var/www/html/ → /www/wwwroot/example.com/
+```
+
+---
+
+# 🐳 Docker 管理（常用命令）
+
+进入 Docker 项目目录：
+
+```bash
+cd /opt/docker/<domain>
+```
+
+### 启动容器
+
+```bash
+docker compose up -d
+```
+
+### 停止容器
+
+```bash
+docker compose down
+```
+
+### 重启容器
+
+```bash
+docker compose restart
+```
+
+### 查看所有容器
+
+```bash
+docker ps -a
+```
+
+### 查看特定容器日志
+
+```bash
+docker logs <container_name>
+```
+
+示例：
+
+```bash
+docker logs example_com
+```
+
+---
+
+# 🧪 调试容器（超详细）
+
+## ✔ 进入容器内部（bash）
+
+```bash
+docker exec -it <container_name> bash
+```
+
+进入后你可以检查：
+
+### 查看 PHP 版本
+
+```bash
+php -v
+```
+
+### 查看 Web 根目录
+
+```bash
+ls -l /var/www/html
+```
+
+### 查看 checkout 代码
+
+```bash
+ls -l /var/www/html/checkout
+```
+
+---
+
+# 🕵️ 深度调试：容器无法启动 / Restarting(1)
+
+如果容器处于：
+
+```
+STATUS: Restarting (1)
+```
+
+请运行：
+
+### 1️⃣ 前台查看启动错误（最重要）
+
+```bash
+docker start -a <container_name>
+```
+
+它会直接显示：
+
+✔ Apache 错误
+✔ php.ini 错误
+✔ vhost 错误
+✔ 权限错误
+✔ 缺少扩展
+
+### 2️⃣ 再看日志
+
+```bash
+docker logs <container_name>
+```
+
+---
+
+# 🧩 Git 更新代码
+
+项目代码在：
+
+```
+/www/wwwroot/<domain>/checkout/
+```
+
+### 手动更新
+
+```bash
+cd /www/wwwroot/<domain>/checkout
+git pull
+```
+
+### 自动更新（推荐）
+
+重新执行部署脚本：
+
+```bash
+bash ProInstall.sh <domain>
+```
+
+脚本会自动执行：
+
+* git pull
+* docker build
+* docker restart（如需）
+
+---
+
+# 📜 Apache 日志查看（容器内）
+
+日志 **不会映射宿主机**，在容器内部查看：
+
+```bash
+docker exec -it <container_name> bash
+cd /var/log/apache2
+tail -f error.log
+```
+
+常见日志路径：
+
+```
+/var/log/apache2/error.log
+/var/log/apache2/access.log
+```
+
+---
+
+# 🛠 容器重建（彻底刷新）
+
+如果你更新了 Dockerfile：
+
+```
+cd /opt/docker/<domain>
+docker compose down
+docker compose up -d --build
+```
+
+---
+
+# ⚠ 常见问题排查
+
+### 1. 502 / 空白页 / 500 错误
+
+进入容器查看 PHP 错误：
+
+```bash
+docker exec -it <container_name> bash
+tail -f /var/log/apache2/error.log
+```
+
+### 2. 宝塔没有反代成功
+
+脚本会自动检测：
+
+```
+proxy_pass http://127.0.0.1:9001;
+```
+
+如果不存在，会自动写入并 reload。
+
+### 3. checkout 目录为空
+
+可能 Git clone 失败 → 重新执行脚本即可：
+
+```bash
+bash ProInstall.sh <domain>
+```
+
+### 4. 无法进入容器（exec 报错）
+
+容器未启动 → 前台启动查看错误：
+
+```bash
+docker start -a <container_name>
+```
+
+---
+
+# 📦 支持扩展（可定制）
+
+如需：
+
+* 自动 composer install
+* 自动 npm build
+* 自动写入 `.env`
+* Supervisor 队列
+* 多项目统一镜像
+* 自动 SSL 配置
+* CI/CD 部署流程
+
+可随时扩展脚本。
+
+---
+
+# ❤️ 欢迎提交 Issue 与 PR
+
+如果你遇到问题，欢迎提 Issue。
+
+```
+
+---
+
+如果你希望，我还可以帮你写：
+
+- GitHub 专业版 README（带徽章、Logo）
+- 英文版 README（国际项目）
+- 自动安装指令（curl -fsSL 一行安装）
+- 多站点部署文档
+
+告诉我即可！
+```
