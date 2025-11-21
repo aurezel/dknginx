@@ -61,7 +61,7 @@ if [ ! -d "$PROJECT_CODE_DIR/.git" ]; then
         rm -rf ${PROJECT_CODE_DIR:?}/*
     fi
 
-    sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$PROJECT_CODE_DIR"
+    sshpass -p "$GIT_PASS" GIT_SSH_COMMAND="ssh -o StrictHostKeyChecking=no" git clone "$GIT_REPO" "$PROJECT_CODE_DIR"
 
     if [ $? -ne 0 ]; then
         echo "❌ Git clone 失败"
