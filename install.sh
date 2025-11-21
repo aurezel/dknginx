@@ -31,24 +31,26 @@ mkdir -p $WWW_DIR
 mkdir -p $LOG_DIR
 
 ###################################################
-# 1️⃣ 解锁宝塔保护文件（否则 .user.ini 不可改）
+# 1️⃣ 解锁宝塔保护文件
 ###################################################
 
-echo "解除宝塔保护文件锁定（chattr -i）..."
+echo "解除宝塔保护文件锁定..."
 chattr -R -i $WWW_DIR 2>/dev/null
 
 ###################################################
-# 2️⃣ 修复宿主机权限（确保 Docker Apache 可写）
+# 2️⃣ 修复宿主机权限（全部改为 www 用户）
 ###################################################
 
-echo "修复宿主机目录权限（www-data:33）..."
+echo "修复宿主机目录权限（www: www）..."
 
-chown -R 33:33 $WWW_DIR
+chown -R www:www $WWW_DIR
+chown -R www:www $LOG_DIR
+
 find $WWW_DIR -type d -exec chmod 755 {} \;
 find $WWW_DIR -type f -exec chmod 644 {} \;
 
 ###################################################
-# 3️⃣ 写 OpenSSL Legacy Provider（避免证书报错）
+# 3️⃣ 写 OpenSSL Legacy Provider
 ###################################################
 
 OPENSSL_FILE="/etc/ssl/openssl.cnf"
@@ -74,7 +76,7 @@ else
 fi
 
 ###################################################
-# 4️⃣ 生成 Dockerfile（强制用 www-data 用户）
+# 4️⃣ Dockerfile（容器内部也改为 www 用户）
 ###################################################
 
 cat > $PROJECT_DIR/Dockerfile <<EOF
@@ -82,15 +84,19 @@ FROM php:7.4-apache
 
 ENV TZ=Asia/Shanghai
 
-# 切换用户：使用 www-data（UID=33）
-USER root
+# 添加 www 用户（uid=1000）
+RUN groupadd -g 1000 www && \
+    useradd -u 1000 -g 1000 -m -s /bin/bash www
 
+# 启用 Apache rewrite
 RUN a2enmod rewrite
 
-# 修复容器内部权限
-RUN chown -R www-data:www-data /var/www
+# 调整 Apache 目录权限
+RUN chown -R www:www /var/www && \
+    chown -R www:www /var/log/apache2
 
-USER www-data
+# 以 www 用户运行
+USER www
 
 COPY vhost.conf /etc/apache2/sites-available/000-default.conf
 
@@ -156,10 +162,8 @@ docker compose up -d --build
 echo "Docker 容器已启动 → http://127.0.0.1:9001"
 
 ###################################################
-# 8️⃣ 写入 Nginx 纯反向代理
+# 8️⃣ 写入 Nginx 反向代理
 ###################################################
-
-echo "写入 Nginx 反向代理配置：$NGINX_CONF"
 
 cat > $NGINX_CONF <<EOF
 server
@@ -178,7 +182,6 @@ server
     ssl_certificate_key   /www/server/panel/vhost/cert/$SUB_DOMAIN/privkey.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    # 纯反向代理 Docker
     location / {
         proxy_pass http://127.0.0.1:9001;
         proxy_set_header Host \$host;
@@ -188,12 +191,10 @@ server
         proxy_set_header X-Forwarded-Host \$host;
     }
 
-    # Let’s Encrypt 验证目录
     location ^~ /.well-known/acme-challenge/ {
         allow all;
     }
 
-    # 禁止访问敏感文件
     location ~ ^/(\.user.ini|\.htaccess|\.git|\.env|README.md) {
         return 404;
     }
@@ -212,6 +213,6 @@ echo "Nginx 配置写入成功"
 /www/server/nginx/sbin/nginx -s reload
 
 echo "=============================================="
-echo "部署完成！"
+echo "部署完成！（www 用户版本）"
 echo "访问：https://$SUB_DOMAIN"
 echo "=============================================="
