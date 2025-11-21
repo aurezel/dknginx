@@ -1,9 +1,12 @@
 #!/bin/bash
 
 ###################################################
-# 一键部署 Docker + Apache + 宝塔 Nginx 自动反向代理
-# 使用方式：
-#   bash deploy.sh billing.payshopnow.com
+# 完整版一键部署脚本：
+# - Git 自动克隆（交互式密码）
+# - 使用 www 用户（UID 1000）
+# - Docker + Apache + PHP7.4
+# - 宝塔 Nginx 自动反向代理
+# - 自动提前创建 Apache 日志，彻底解决权限被拒绝问题
 ###################################################
 
 if [ $# -lt 1 ]; then
@@ -13,10 +16,14 @@ fi
 
 SUB_DOMAIN=$1
 MAIN_DOMAIN=$(echo $SUB_DOMAIN | sed 's/^[^.]*\.//')
+
 PROJECT_DIR="/opt/docker/$SUB_DOMAIN"
 WWW_DIR="/www/wwwroot/$SUB_DOMAIN"
 LOG_DIR="/var/log/$SUB_DOMAIN"
 NGINX_CONF="/www/server/panel/vhost/nginx/${SUB_DOMAIN}.conf"
+
+# Git 仓库地址
+GIT_REPO="ssh://git@38.58.183.76:57577/home/git/local/stripifyv11.git"
 
 echo "=============================================="
 echo " 部署域名：$SUB_DOMAIN"
@@ -24,6 +31,7 @@ echo " 主域名：  $MAIN_DOMAIN"
 echo " Docker：  $PROJECT_DIR"
 echo " 网站目录：$WWW_DIR"
 echo " 日志目录：$LOG_DIR"
+echo " Git仓库： $GIT_REPO"
 echo "=============================================="
 
 mkdir -p $PROJECT_DIR
@@ -33,15 +41,42 @@ mkdir -p $LOG_DIR
 ###################################################
 # 1️⃣ 解锁宝塔保护文件
 ###################################################
-
-echo "解除宝塔保护文件锁定..."
 chattr -R -i $WWW_DIR 2>/dev/null
 
 ###################################################
-# 2️⃣ 修复宿主机权限（全部改为 www 用户）
+# 2️⃣ Git 克隆项目（安全交互式密码）
 ###################################################
 
-echo "修复宿主机目录权限（www: www）..."
+echo "===> 开始克隆 Git 项目"
+read -sp "请输入 Git 仓库密码: " GIT_PASS
+echo
+
+# 安装 sshpass
+if ! command -v sshpass >/dev/null 2>&1; then
+    apt-get update -y
+    apt-get install -y sshpass
+fi
+
+# 清空旧项目目录
+if [ "$(ls -A $WWW_DIR)" ]; then
+    echo "检测到 $WWW_DIR 非空 → 清空目录..."
+    rm -rf ${WWW_DIR:?}/*
+fi
+
+# 克隆仓库
+sshpass -p "$GIT_PASS" git clone "$GIT_REPO" "$WWW_DIR"
+
+if [ $? -ne 0 ]; then
+    echo "❌ Git 克隆失败——请检查密码或仓库权限"
+    exit 1
+fi
+
+echo "✔ Git 克隆成功"
+
+###################################################
+# 3️⃣ 修复宿主机权限（www:www）
+###################################################
+echo "修复目录权限为 www:www ..."
 
 chown -R www:www $WWW_DIR
 chown -R www:www $LOG_DIR
@@ -50,33 +85,7 @@ find $WWW_DIR -type d -exec chmod 755 {} \;
 find $WWW_DIR -type f -exec chmod 644 {} \;
 
 ###################################################
-# 3️⃣ 写 OpenSSL Legacy Provider
-###################################################
-
-OPENSSL_FILE="/etc/ssl/openssl.cnf"
-
-LEGACY_BLOCK=$(cat << 'EOF'
-[openssl_init]
-providers = provider_sect
-[provider_sect]
-default = default_sect
-legacy = legacy_sect
-[default_sect]
-activate = 1
-[legacy_sect]
-activate = 1
-EOF
-)
-
-if ! grep -q "\[openssl_init\]" "$OPENSSL_FILE"; then
-    echo "$LEGACY_BLOCK" | sudo tee -a "$OPENSSL_FILE" > /dev/null
-    echo "OpenSSL Legacy Provider 写入成功"
-else
-    echo "OpenSSL Legacy Provider 已存在"
-fi
-
-###################################################
-# 4️⃣ Dockerfile（容器内部也改为 www 用户）
+# 4️⃣ 生成 Dockerfile（含 Apache 日志修复）
 ###################################################
 
 cat > $PROJECT_DIR/Dockerfile <<EOF
@@ -84,18 +93,23 @@ FROM php:7.4-apache
 
 ENV TZ=Asia/Shanghai
 
-# 添加 www 用户（uid=1000）
+# 创建 www 用户
 RUN groupadd -g 1000 www && \
     useradd -u 1000 -g 1000 -m -s /bin/bash www
 
-# 启用 Apache rewrite
 RUN a2enmod rewrite
 
-# 调整 Apache 目录权限
-RUN chown -R www:www /var/www && \
+# 使用 root 创建 Apache 日志并赋予 www 权限（关键修复）
+USER root
+RUN mkdir -p /var/log/apache2 && \
+    touch /var/log/apache2/error.log && \
+    touch /var/log/apache2/access.log && \
     chown -R www:www /var/log/apache2
 
-# 以 www 用户运行
+# 修复 web 目录权限
+RUN mkdir -p /var/www/html && chown -R www:www /var/www
+
+# 切换到 www 用户
 USER www
 
 COPY vhost.conf /etc/apache2/sites-available/000-default.conf
@@ -106,7 +120,7 @@ EOF
 echo "Dockerfile 已生成"
 
 ###################################################
-# 5️⃣ Apache vhost.conf
+# 5️⃣ vhost.conf
 ###################################################
 
 cat > $PROJECT_DIR/vhost.conf <<EOF
@@ -143,26 +157,26 @@ services:
     environment:
       - TZ=Asia/Shanghai
     networks:
-      - billing_network
+      - deploy_net
 
 networks:
-  billing_network:
+  deploy_net:
     driver: bridge
 EOF
 
 echo "docker-compose.yml 已生成"
 
 ###################################################
-# 7️⃣ 启动 Docker 容器
+# 7️⃣ 启动 Docker
 ###################################################
-
 cd $PROJECT_DIR
+docker compose down
 docker compose up -d --build
 
-echo "Docker 容器已启动 → http://127.0.0.1:9001"
+echo "Docker 已启动 → http://127.0.0.1:9001"
 
 ###################################################
-# 8️⃣ 写入 Nginx 反向代理
+# 8️⃣ 写入宝塔 Nginx 反代
 ###################################################
 
 cat > $NGINX_CONF <<EOF
@@ -180,7 +194,6 @@ server
 
     ssl_certificate       /www/server/panel/vhost/cert/$SUB_DOMAIN/fullchain.pem;
     ssl_certificate_key   /www/server/panel/vhost/cert/$SUB_DOMAIN/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
 
     location / {
         proxy_pass http://127.0.0.1:9001;
@@ -188,31 +201,13 @@ server
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
     }
-
-    location ^~ /.well-known/acme-challenge/ {
-        allow all;
-    }
-
-    location ~ ^/(\.user.ini|\.htaccess|\.git|\.env|README.md) {
-        return 404;
-    }
-
-    access_log  /www/wwwlogs/$SUB_DOMAIN.log;
-    error_log   /www/wwwlogs/$SUB_DOMAIN.error.log;
 }
 EOF
-
-echo "Nginx 配置写入成功"
-
-###################################################
-# 9️⃣ 重载 nginx
-###################################################
 
 /www/server/nginx/sbin/nginx -s reload
 
 echo "=============================================="
-echo "部署完成！（www 用户版本）"
-echo "访问：https://$SUB_DOMAIN"
+echo "🎉 部署完成！"
+echo "访问地址：https://$SUB_DOMAIN"
 echo "=============================================="
